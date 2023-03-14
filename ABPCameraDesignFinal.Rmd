@@ -1,0 +1,242 @@
+---
+title: "ABPCameraDesign"
+author: "Mathieu Pruvot"
+date: "2023-01-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+
+```{r, include = FALSE}
+library(sf)
+library(tidyverse)
+library(gtsummary)
+library(Microsoft365R)
+library(janitor)
+```
+
+Load and plot data
+```{r, include=FALSE}
+#?Microsoft365R
+
+#team <- get_team("https://uofc.sharepoint.com/:f:/r/sites/PruvotLab-WildPigProject/")
+
+area <- st_read("C:\\Users\\mpruvot\\OneDrive - University of Calgary\\Wild Pig Project\\Luis\\3. Raw Data\\ABPork camera design\\V4-1_TWP_cameras2.shp")
+counties <- st_read("C:\\Users\\mpruvot\\OneDrive - University of Calgary\\Wild Pig Project\\Luis\\3. Raw Data\\ABPork camera design\\RURAL_cameras1.shp")
+hotcore <- st_read("C:\\Users\\mpruvot\\OneDrive - University of Calgary\\Wild Pig Project\\Luis\\3. Raw Data\\ABPork camera design\\V4-1_TWP_clip_RURAL_cameras1.shp")
+hotcore <- st_make_valid(hotcore)
+```
+
+
+```{r}
+plot(st_geometry(counties))
+plot(hotcore[1],add=T)
+
+
+
+
+```
+
+
+
+```{r, include=FALSE}
+ABP <- st_read("C:\\Users\\mpruvot\\Documents\\Work\\UofC\\Research\\Wild pigs\\Data analysis\\Join_ABPtoAGIswine.shp")
+AGI <- st_read("C:\\Users\\mpruvot\\Documents\\Work\\UofC\\Research\\Wild pigs\\Data analysis\\AGI_swine.shp")
+
+```
+
+
+
+overall farm size distribution
+```{r}
+ABP %>% 
+ggplot(aes(x=HOG))+
+  geom_histogram()
+```
+
+identify ABP intersecting with county and show size distribution
+```{r}
+ABP %>% 
+st_intersection(counties) %>% 
+ggplot(aes(x=HOG))+
+  geom_histogram()
+```
+
+identify ABP intersecting with core area and show size distribution
+```{r}
+ABP %>% 
+st_intersection(hotcore) %>% 
+ggplot(aes(x=HOG))+
+  geom_histogram()
+```
+
+# Farm selection
+
+Design scheme:
+we initially deploy 100 cameras, with the following stratification:
+
+- 15 outdoor and 85 indoor
+- among 85: 65 in core area and 20 in broader counties
+- among the 65 core cameras: 15 in commercial farms, 50 in backyard farms
+- among the 50 : stratify by county, distribute according to size distribution
+
+
+Outdoor farms: get all 15 outdoor farms in the counties, regardless of size and location
+
+```{r}
+Sample_OutdoorFarm <- ABP %>% 
+st_intersection(st_union(counties))%>% 
+  st_join(y=counties) %>% 
+  filter(Pigs_Have=="Yes") 
+
+plot(st_geometry(counties))
+plot(hotcore[1],add=T)
+plot(st_geometry(Sample_OutdoorFarm),add=T)
+```
+
+15 total in the counties
+
+```{r}
+Sample_OutdoorFarm %>% 
+st_intersection(st_union(hotcore))%>% 
+  tabyl(CQA_Status)
+```
+4 in the core area
+this means 11 outside core, including 3 commercials
+
+
+Select 1 smallholder farm (CQA_Status Not validated) per county that was inside the county but outside core area and the furthest away from the core area, for a total of 20 farms. We excluded Strathcona county, which had extensive coverage by core area (limited additional information to sample county outside of core area)
+
+```{r}
+FarmInCounty <- ABP %>% 
+st_intersection(st_difference(st_geometry(counties),st_union(hotcore)))%>% 
+  st_join(y=counties) %>% 
+  filter(Pigs_Have=="No" & !GEONAME%in% c("STRATHCONA COUNTY") & CQA_Status=="Not Validated")
+
+Sample_FarmInCounty <- ABP %>% 
+st_intersection(st_difference(st_geometry(counties),st_union(hotcore)))%>% 
+  st_join(y=counties) %>% 
+  filter(!Pigs_Have=="Yes" & !GEONAME%in% c("STRATHCONA COUNTY") & CQA_Status=="Not Validated") %>% 
+  mutate(distcore=st_distance(x=.,y=st_union(hotcore))) %>% 
+  group_by(GEONAME) %>% 
+  arrange(desc(distcore)) %>% 
+  slice(1) %>% 
+  select(-distcore)
+```
+
+Control that the most remote was selected by comparing selected map and map of smallholder in county outside core
+```{r}
+plot(st_geometry(counties))
+plot(hotcore[1],add=T)
+plot(st_geometry(Sample_FarmInCounty),add=T)
+
+plot(st_geometry(counties))
+plot(hotcore[1],add=T)
+plot(st_geometry(FarmInCounty),add=T)
+```
+
+among the 65 core cameras: 15 in commercial farms
+
+
+Not enough commercial farms in core area, so used a 10k buffer around core
+```{r}
+CommFarmInCore <- ABP %>% 
+st_intersection(st_buffer(st_union(hotcore),dist=10000))%>% 
+  st_join(y=counties) %>% 
+  filter(!Pigs_Have=="Yes" & CQA_Status %in% c("Valid"))
+
+
+Sample_CommFarmInCore <- CommFarmInCore %>% 
+  group_by(GEONAME) %>% 
+  sample_n(size=1)
+```
+This resulted in 12 commercial farms
+
+Here is the map
+```{r}
+plot(st_geometry(counties))
+plot(hotcore[1],add=T)
+plot(st_geometry(Sample_CommFarmInCore),add=T)
+
+
+```
+
+Look at number of large farms per county and identify the 4 counties with the most large farms
+
+
+```{r}
+ManyCommFarm <- CommFarmInCore %>% 
+  group_by(GEONAME) %>% 
+  summarize(n=n()) %>% 
+  arrange(desc(n)) %>% 
+  filter(!is.na(GEONAME)) %>% 
+  slice(1:4) %>% 
+  select(GEONAME) %>% 
+  as.data.frame() %>% 
+  select(GEONAME)
+
+ManyCommFarm
+```
+
+Select an additional 4 farms from counties that have the most farms and add to the previous selection
+```{r}
+Sample_CommFarmInCore <- CommFarmInCore %>% 
+  filter(GEONAME %in% ManyCommFarm$GEONAME & !Premises_I %in% Sample_CommFarmInCore$Premises_I) %>% 
+  group_by(GEONAME) %>% 
+  sample_n(size=1) %>% 
+  rbind(Sample_CommFarmInCore)
+```
+
+among the 50 smallholder in core: stratify by county, distribute according to size distribution
+
+Select all indoor smallholder farms in the core
+```{r}
+SmallFarmInCore <- ABP %>% 
+st_intersection(st_union(hotcore))%>% 
+  st_join(y=counties) %>% 
+  filter(!Pigs_Have=="Yes" & CQA_Status=="Not Validated")
+
+
+plot(st_geometry(counties))
+plot(hotcore[1],add=T)
+plot(st_geometry(SmallFarmInCore),add=T)
+```
+
+inspect size distribution. Take farms with HOG>2, because more relevant to pathogen transmission if not just isolated animals. Happens to provide 52 farms
+```{r}
+SmallFarmInCore %>% 
+  filter(HOG>2) %>% 
+  select(HOG) %>% 
+  summary()
+```
+
+
+```{r}
+
+Sample_SmallFarmInCore <- SmallFarmInCore %>% 
+  filter(HOG>2)
+
+
+```
+
+```{r}
+plot(st_geometry(counties))
+plot(hotcore[1],add=T)
+plot(st_geometry(Sample_SmallFarmInCore),add=T)
+
+```
+```{r}
+Sample_Total <- rbind(Sample_CommFarmInCore,Sample_FarmInCounty, Sample_OutdoorFarm, Sample_SmallFarmInCore)
+#save(Sample_Total,file="Sample_Total.Rdata")
+```
+
+```{r}
+plot(st_geometry(counties))
+plot(hotcore[1],add=T)
+plot(st_geometry(Sample_Total),add=T)
+```
+
+
